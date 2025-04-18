@@ -1,0 +1,418 @@
+<!DOCTYPE html>
+<html>
+<!-- This is the top of our webpage. It tells the browser this is HTML. -->
+
+<head>
+    <!-- The head contains setup information for our page. -->
+
+    <!-- These links bring in special icons and styles for buttons and layout. -->
+    <link rel="stylesheet" href="https://fonts.googleapis.com/icon?family=Material+Icons">
+    <link rel="stylesheet" href="https://code.getmdl.io/1.3.0/material.indigo-pink.min.css">
+    <script defer src="https://code.getmdl.io/1.3.0/material.min.js"></script>
+
+    <!-- CSS styles make our page look nice. -->
+    <style>
+        /* The video player is hidden until we start screen sharing. */
+        #videoElement {
+            width: 80%;              /* Take up 80% of the container width */
+            height: auto;            /* Auto-adjust the height */
+            object-fit: cover;       /* Make sure the video covers the area */
+            border-radius: 20px;     /* Round corners of the video box */
+            display: none;           /* Hide it at first */
+        }
+
+        /* The canvas is hidden and used behind the scenes to take snapshots. */
+        #canvasElement {
+            display: none;
+        }
+
+        /* demo-content centers everything and stacks items vertically. */
+        .demo-content {
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            align-items: center;
+        }
+
+        /* button-group adds space below the buttons. */
+        .button-group {
+            margin-bottom: 20px;
+        }
+
+        /* chat area is where text messages appear. */
+        #chatArea {
+            width: 80%;
+            max-width: 640px;
+            height: 200px;
+            border: 1px solid #ccc;
+            overflow-y: auto;    /* Scroll if too many messages */
+            margin-bottom: 20px;
+            padding: 10px;
+            border-radius: 5px;
+        }
+
+        /* chatInput is where the user types their message. */
+        #chatInput {
+            width: 80%;
+            max-width: 640px;
+            margin-top: 10px;
+        }
+
+        /* chatLog shows responses from our server or AI. */
+        #chatLog {
+            width: 80%;
+            max-width: 640px;
+            margin-top: 10px;
+        }
+
+        /* When mic is off, button is gray. */
+        #micButton.mic-off {
+            background-color: #ccc;
+        }
+
+        /* When mic is on, button turns red. */
+        #micButton.mdl-button--colored {
+            background-color: red;
+        }
+
+        /* On larger screens, add some padding around demo-content. */
+        @media (min-width: 768px) {
+            .demo-content { padding: 20px; }
+        }
+    </style>
+</head>
+
+<body>
+    <!-- We use a Material Design layout for nice header and content areas. -->
+    <div class="mdl-layout mdl-js-layout mdl-layout--fixed-header">
+
+        <!-- Header is the top bar of our page. -->
+        <header class="mdl-layout__header">
+            <div class="mdl-layout__header-row">
+                <span class="mdl-layout-title">Dux Machina Live Demo</span>
+            </div>
+        </header>
+
+        <!-- Main content area. -->
+        <main class="mdl-layout__content">
+            <div class="page-content">
+                <div class="demo-content">
+
+                    <!-- Button group: screen share and mic toggle. -->
+                    <div class="button-group">
+                        <!-- Screen share button: clicking this starts screen capture. -->
+                        <button id="screenShareButton"
+                                class="mdl-button mdl-js-button mdl-button--fab mdl-button--mini-fab">
+                            <i class="material-icons">screen_share</i>
+                        </button>
+
+                        <!-- Mic button: clicking this turns microphone input on/off. -->
+                        <button id="micButton"
+                                class="mdl-button mdl-js-button mdl-button--fab mdl-button--mini-fab mic-off">
+                            <i id="micIcon" class="material-icons">mic_off</i>
+                        </button>
+                    </div>
+
+                    <!-- Video element shows the live screen share when active. -->
+                    <video id="videoElement" autoplay></video>
+
+                    <!-- Canvas element captures snapshots of the video. -->
+                    <canvas id="canvasElement"></canvas>
+
+                    <!-- Chat area for displaying sent and received messages. -->
+                    <div id="chatArea"></div>
+
+                    <!-- Text input for typing messages. -->
+                    <div class="mdl-textfield mdl-js-textfield">
+                        <input class="mdl-textfield__input"
+                               type="text"
+                               id="chatInput"
+                               placeholder="Type your message here...">
+                        <label class="mdl-textfield__label" for="chatInput"></label>
+                    </div>
+
+                    <!-- Area below to log incoming responses. -->
+                    <div id="chatLog"></div>
+                </div>
+            </div>
+        </main>
+    </div>
+
+    <!-- JavaScript code runs after the page loads (defer attribute). -->
+    <script defer>
+        // URL for our WebSocket server
+        const URL = "ws://localhost:9083";
+
+        // Get references to HTML elements by their IDs
+        const video = document.getElementById("videoElement");      // Video area
+        const canvas = document.getElementById("canvasElement");    // Canvas for snapshots
+        let context = canvas.getContext("2d");                     // Drawing context
+        const chatInput = document.getElementById('chatInput');      // Message input box
+        const micButton = document.getElementById('micButton');      // Mic on/off button
+        const screenShareButton = document.getElementById('screenShareButton');  // Screen share button
+        const micIcon = document.getElementById('micIcon');          // Icon inside mic button
+
+        // Variables for audio/video streaming and messaging
+        let webSocket = null;        // WebSocket connection
+        let audioContext = null;     // Browser audio context for mic
+        let processor = null;        // Audio processor node
+        let pcmData = [];            // Array to store raw mic data
+        let interval = null;         // Timer for sending audio chunks
+        let initialized = false;     // Flag to know if audio setup is done
+        let audioInputContext;       // Another audio context for playback
+        let workletNode;             // Node to process incoming audio
+        let isMicOn = false;         // Mic on/off state
+        let stream = null;           // Screen share stream
+        let currentFrameB64;         // Stores snapshot in base64 form
+
+        /**
+         * startScreenShare: Ask the browser to share the screen.
+         * We get a media stream and show it in our <video> element.
+         */
+        async function startScreenShare() {
+            try {
+                // Request display media (screen) from browser
+                stream = await navigator.mediaDevices.getDisplayMedia({
+                    video: {
+                        width: { ideal: window.screen.width },
+                        height: { ideal: window.screen.height },
+                        aspectRatio: { ideal: window.screen.width / window.screen.height }
+                    }
+                });
+
+                // Put the stream into the video element and show it
+                video.srcObject = stream;
+                video.style.display = 'block';
+
+                // Wait until metadata (size, etc.) loads
+                await new Promise(resolve => video.onloadedmetadata = resolve);
+                console.log('Screen sharing started successfully');
+            } catch (err) {
+                console.error("Error accessing the screen: ", err);
+            }
+        }
+
+        /**
+         * captureImage: Take a snapshot of the current video frame every few seconds.
+         * We draw it on the hidden canvas and save it as a base64 string.
+         */
+        function captureImage() {
+            // Only run if stream and video sizes are valid
+            if (stream && video.videoWidth && video.videoHeight && context) {
+                canvas.width = video.videoWidth;
+                canvas.height = video.videoHeight;
+                context.drawImage(video, 0, 0, canvas.width, canvas.height);
+                // Convert image data into a base64 string
+                currentFrameB64 = canvas.toDataURL("image/jpeg").split(",")[1].trim();
+            } else {
+                console.log("no stream or metadata not loaded");
+            }
+        }
+
+        /**
+         * On page load:
+         * 1. Initialize audio for playback and recording.
+         * 2. Connect the WebSocket.
+         * 3. Start snapshot timer.
+         * 4. Attach event listeners for buttons and input.
+         */
+        window.addEventListener("load", async () => {
+            await initializeAudioContext();  // Prepare playback audio
+            connect();                       // Open WebSocket
+            setInterval(captureImage, 3000); // Snapshot every 3s
+
+            // When screenShareButton is clicked, start screen share
+            screenShareButton.addEventListener('click', startScreenShare);
+
+            // When micButton is clicked, toggle mic on/off
+            micButton.addEventListener('click', () => {
+                isMicOn = !isMicOn;
+                micButton.classList.toggle('mdl-button--colored', isMicOn);
+                if (isMicOn) {
+                    micIcon.textContent = 'mic';
+                    startAudioInput();  // Start sending mic data
+                } else {
+                    stopAudioInput();   // Stop sending mic data
+                    micIcon.textContent = 'mic_off';
+                }
+            });
+
+            // When user presses Enter in the chat input, send text message
+            chatInput.addEventListener('keydown', async (event) => {
+                if (event.key === 'Enter') {
+                    event.preventDefault();
+                    const message = chatInput.value;
+                    sendMessage(message);
+                    addMessageToChat("You", message);
+                    chatInput.value = '';
+                }
+            });
+        });
+
+        /**
+         * connect: Open a WebSocket to our server.
+         * Set event handlers for open, message, error, and close.
+         */
+        function connect() {
+            webSocket = new WebSocket(URL);
+            webSocket.onopen    = () => sendInitialSetupMessage();
+            webSocket.onmessage = receiveMessage;
+            webSocket.onerror   = console.error;
+            webSocket.onclose   = () => alert("Connection closed");
+        }
+
+        /**
+         * sendInitialSetupMessage: Tell the server we want audio + text responses.
+         */
+        function sendInitialSetupMessage() {
+            webSocket.send(JSON.stringify({
+                setup: { generation_config: { response_modalities: ["AUDIO", "TEXT"] } }
+            }));
+        }
+
+        /**
+         * sendVoiceMessage: Package mic chunk + latest snapshot and send.
+         */
+        function sendVoiceMessage(b64PCM) {
+            if (!webSocket) return;
+            const payload = {
+                realtime_input: {
+                    media_chunks: [
+                        { mime_type: "audio/pcm", data: b64PCM },
+                        { mime_type: "image/jpeg", data: currentFrameB64 }
+                    ]
+                }
+            };
+            webSocket.send(JSON.stringify(payload));
+            console.log("sent: ", payload);
+        }
+
+        /**
+         * receiveMessage: Handle incoming messages from server.
+         * Show text in chatLog or play audio through audioWorklet.
+         */
+        function receiveMessage(event) {
+            const data = JSON.parse(event.data);
+            if (data.text) addParagraphToDiv('chatLog', data.text);
+            if (data.audio) injestAudioChuckToPlay(data.audio);
+        }
+
+        /**
+         * sendMessage: Send a text message along with the latest snapshot.
+         */
+        async function sendMessage(message) {
+            const payload = {
+                realtime_input: {
+                    text: message,
+                    media_chunks: [{ mime_type: "image/jpeg", data: currentFrameB64 }]
+                }
+            };
+            webSocket.send(JSON.stringify(payload));
+        }
+
+        /**
+         * addMessageToChat: Show user-sent messages in chatArea.
+         */
+        function addMessageToChat(sender, message) {
+            addParagraphToDiv('chatArea', `${sender}: ${message}`);
+        }
+
+        /**
+         * initializeAudioContext: Setup playback audioWorklet for server audio.
+         */
+        async function initializeAudioContext() {
+            if (initialized) return;
+            audioInputContext = new (window.AudioContext || window.webkitAudioContext)({ sampleRate: 24000 });
+            await audioInputContext.audioWorklet.addModule("pcm-processor.js");
+            workletNode = new AudioWorkletNode(audioInputContext, "pcm-processor");
+            workletNode.connect(audioInputContext.destination);
+            initialized = true;
+        }
+
+        /**
+         * base64ToArrayBuffer: Convert base64 audio into ArrayBuffer.
+         */
+        function base64ToArrayBuffer(base64) {
+            const binary = atob(base64);
+            const bytes = new Uint8Array(binary.length);
+            for (let i = 0; i < binary.length; i++) {
+                bytes[i] = binary.charCodeAt(i);
+            }
+            return bytes.buffer;
+        }
+
+        /**
+         * convertPCM16LEToFloat32: Turn PCM16 little-endian into Float32 for playback.
+         */
+        function convertPCM16LEToFloat32(pcm) {
+            const input = new Int16Array(pcm);
+            const output = new Float32Array(input.length);
+            for (let i = 0; i < input.length; i++) {
+                output[i] = input[i] / 32768;
+            }
+            return output;
+        }
+
+        /**
+         * injestAudioChuckToPlay: Resume audio if paused, then play chunk.
+         */
+        async function injestAudioChuckToPlay(base64Audio) {
+            if (audioInputContext.state === "suspended") await audioInputContext.resume();
+            const buffer = base64ToArrayBuffer(base64Audio);
+            const floatData = convertPCM16LEToFloat32(buffer);
+            workletNode.port.postMessage(floatData);
+        }
+
+        /**
+         * recordChunk: Called every few seconds to send raw mic data.
+         */
+        function recordChunk() {
+            const buffer = new ArrayBuffer(pcmData.length * 2);
+            const view = new DataView(buffer);
+            pcmData.forEach((v, i) => view.setInt16(i * 2, v, true));
+            const b64 = btoa(String.fromCharCode.apply(null, new Uint8Array(buffer)));
+            sendVoiceMessage(b64);
+            pcmData = [];  // Clear after sending
+        }
+
+        /**
+         * startAudioInput: Open mic, convert to PCM16, store in pcmData.
+         */
+        async function startAudioInput() {
+            audioContext = new AudioContext({ sampleRate: 16000 });
+            const micStream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 16000 } });
+            const source = audioContext.createMediaStreamSource(micStream);
+            processor = audioContext.createScriptProcessor(4096, 1, 1);
+            processor.onaudioprocess = e => {
+                const input = e.inputBuffer.getChannelData(0);
+                const pcm = new Int16Array(input.length);
+                for (let i = 0; i < input.length; i++) {
+                    pcm[i] = input[i] * 0x7FFF;
+                }
+                pcmData.push(...pcm);
+            };
+            source.connect(processor);
+            interval = setInterval(recordChunk, 3000);
+        }
+
+        /**
+         * stopAudioInput: Turn off mic processing and stop sending.
+         */
+        function stopAudioInput() {
+            if (processor) processor.disconnect();
+            if (audioContext) audioContext.close();
+            clearInterval(interval);
+        }
+
+        /**
+         * addParagraphToDiv: Helper to add text lines to a div.
+         */
+        function addParagraphToDiv(divId, text) {
+            const p = document.createElement('p');
+            p.textContent = text;
+            document.getElementById(divId).appendChild(p);
+        }
+    </script>
+</body>
+
+</html>
